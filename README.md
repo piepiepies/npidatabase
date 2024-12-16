@@ -8,7 +8,8 @@ The links to the data:
 Files included:
   * the Python code to load the NPI files from CMS site
   * the configuration screenshot of the manual upload of the taxonomy and details CSV onto SQL Server through SSMS
-  * the SQL code to create the primary and foreign keys between the two tables.
+  * the SQL code to create the primary and foreign keys between the two tables
+  * A database diagram from SSMS for the tables
 
 Instructions:
   * Can follow along the comments left in the Python code file, would have to provide your own sql server info
