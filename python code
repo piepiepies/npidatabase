@@ -1,0 +1,467 @@
+# importing the necessary libaries
+import pandas as pd
+import numpy as np
+from time import process_time
+import pyodbc
+import sqlalchemy as sa
+from sqlalchemy.engine import URL
+from bcpandas import SqlCreds, to_sql
+
+t1_total_start = process_time()
+# -------------------------------------------------------------------------------------------------------------------------------------------
+# status update
+print('Starting with creating the default dataframe by loading in the two csv')
+t1_start = process_time() 
+
+#iteration to create taxonomy column names selected from the npi data csv
+#goes up to 15
+taxonomy_code = ['Healthcare Provider Taxonomy Code_1']
+taxonomy_switch = ['Healthcare Provider Primary Taxonomy Switch_1']
+taxonomy_group = ['Healthcare Provider Taxonomy Group_1']
+
+counter = 2
+code_string = 'Healthcare Provider Taxonomy Code'
+switch_string = 'Healthcare Provider Primary Taxonomy Switch'
+group_string = 'Healthcare Provider Taxonomy Group'
+
+while counter < 16:
+    taxonomy_code.append(code_string + '_' + str(counter))
+    taxonomy_switch.append(switch_string + '_' + str(counter))
+    taxonomy_group.append(group_string + '_' + str(counter))
+    counter += 1
+
+# iteration to create the column names used in read_csv
+# make copies of this list please because this default one should not be extended, need this list for other iterations
+default_cols = ['NPI','Entity Type Code', 
+            'Is Sole Proprietor', 'Is Organization Subpart',
+            'NPI Deactivation Date', 'NPI Reactivation Date', 
+            'Last Update Date', 'NPI Deactivation Reason Code',
+            'Provider Organization Name (Legal Business Name)', 
+            'Provider Last Name (Legal Name)', 'Provider First Name', 
+            'Provider Middle Name', 'Provider Name Prefix Text', 
+            'Provider Name Suffix Text', 'Provider Credential Text', 
+            'Provider Other Organization Name', 'Provider Other Last Name', 
+            'Provider Other First Name', 'Provider Other Middle Name', 
+            'Provider Other Name Prefix Text', 'Provider Other Name Suffix Text', 
+            'Provider Other Credential Text', 'Provider First Line Business Mailing Address', 
+            'Provider Second Line Business Mailing Address', 'Provider Business Mailing Address City Name', 
+            'Provider Business Mailing Address State Name', 'Provider Business Mailing Address Postal Code', 
+            'Provider Business Mailing Address Country Code (If outside U.S.)', 'Provider Business Mailing Address Telephone Number', 
+            'Provider Business Mailing Address Fax Number', 'Provider First Line Business Practice Location Address', 
+            'Provider Second Line Business Practice Location Address', 'Provider Business Practice Location Address City Name', 
+            'Provider Business Practice Location Address State Name', 'Provider Business Practice Location Address Postal Code', 
+            'Provider Business Practice Location Address Country Code (If outside U.S.)', 
+            'Provider Business Practice Location Address Telephone Number', 
+            'Provider Business Practice Location Address Fax Number', 
+            'Authorized Official Last Name', 'Authorized Official First Name', 
+            'Authorized Official Middle Name', 'Authorized Official Title or Position', 'Authorized Official Telephone Number']
+
+# first copy of the default cols
+csv_cols = default_cols.copy()
+
+counter_1 = 0
+while counter_1 < 15:
+    csv_cols.append(taxonomy_code[counter_1])
+    csv_cols.append(taxonomy_switch[counter_1])
+    counter_1 += 1
+
+csv_cols.extend(taxonomy_group)
+
+#setting up the file path for the main one
+file_path = r'C:\Users\Ray\Desktop\cms\npi_taxonomy related'\
+    r'\NPPES_Data_Dissemination_November_2024\npidata_pfile_20050523-20241110.csv'
+
+#setting up the file path for the weekly update
+
+file_path2 = r'C:\Users\Ray\Desktop\cms\NPPES_Data_Dissemination_111824_112424_Weekly'\
+      r'\npidata_pfile_20241118-20241124.csv'
+
+
+df = pd.read_csv(file_path, usecols = csv_cols, low_memory=False)[csv_cols]
+df_temp = pd.read_csv(file_path2, usecols = csv_cols, low_memory=False)[csv_cols]
+
+# updating the main npi file with the weekly one on 11/18/2024
+df = df.set_index(['NPI']).copy()
+df.update(df_temp.set_index(['NPI']))
+
+#drop the index afterwards
+df = df.reset_index().copy()
+
+# changing the deactivation date and reactivation date to dates
+df['NPI Deactivation Date'] = pd.to_datetime(df['NPI Deactivation Date'])
+df['NPI Reactivation Date'] = pd.to_datetime(df['NPI Reactivation Date'])
+df['Last Update Date'] = pd.to_datetime(df['Last Update Date'])
+
+# status update
+t1_stop = process_time()
+print('Finished with loading and updating the dataframe with weekly update csv')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start)
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+# status update
+print('creating the df containing npi with primary taxonomy codes')
+t1_start = process_time() 
+
+#creating new dataframe with only needed columns
+tax_code_str = 'Healthcare Provider Taxonomy Code_'
+tax_switch_str = 'Healthcare Provider Primary Taxonomy Switch_'
+tax_group_str = 'Healthcare Provider Taxonomy Group_'
+primary_df = pd.DataFrame()
+
+counter_2 = 1
+
+# second copy of the default cols
+cols_copy2 = default_cols.copy()
+
+# need to write the the extend part by itself, can't put it in the brackets.
+# extend is inplace, returns None
+while counter_2 < 16:
+    cols_copy2.extend([f'{tax_code_str}{counter_2}',f'{tax_switch_str}{counter_2}',f'{tax_group_str}{counter_2}'])
+    df1 = df[df[f'{tax_switch_str}{counter_2}'] == 'Y'][cols_copy2].copy()
+    df1 = df1.rename(columns = {f'{tax_code_str}{counter_2}': 'Healthcare Provider Taxonomy Code',
+                                f'{tax_switch_str}{counter_2}' : 'Primary Taxonomy Switch',
+                                f'{tax_group_str}{counter_2}': 'Healthcare Provider Taxonomy Group'}).copy()
+    # reset the list since the extend will continuously take new columns
+    cols_copy2 = default_cols.copy()
+    primary_df = pd.concat([primary_df,df1], ignore_index = True)
+    primary_df = primary_df.drop_duplicates(subset=['NPI','Healthcare Provider Taxonomy Code'], ignore_index = True)
+    counter_2 += 1
+
+# status update
+t1_stop = process_time()
+print('finished creating df with npi with primary taxonomy codes')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start) 
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+#status update
+print('starting the process to create the two dfs containing NPIs not in the previous table')
+t1_start = process_time()
+
+#creating a dataframe for NPIs that were left out from the new_df
+secondary_df = df.loc[~(df.loc[:,taxonomy_switch].isin(['Y']).any(axis = 1))]
+
+# this is for NPIs that have been deactivated and not reactivated
+# third copy of the default cols
+deact_df = pd.DataFrame()
+counter_2 = 1
+cols_copy3 = default_cols.copy()
+while counter_2 < 16:
+    cols_copy3.extend([f'{tax_code_str}{counter_2}',f'{tax_switch_str}{counter_2}',f'{tax_group_str}{counter_2}'])
+    df1 = secondary_df[~secondary_df['NPI Deactivation Date'].isna() 
+                    & secondary_df['NPI Reactivation Date'].isna()][cols_copy3].copy()
+    df1 = df1.rename(columns = {f'{tax_code_str}{counter_2}': 'Healthcare Provider Taxonomy Code',
+                                f'{tax_switch_str}{counter_2}' : 'Primary Taxonomy Switch',
+                                f'{tax_group_str}{counter_2}': 'Healthcare Provider Taxonomy Group'}).copy()
+    # reset the list since the extend will continuously take new columns
+    cols_copy3 = default_cols.copy()
+    deact_df = pd.concat([deact_df,df1], ignore_index = True)
+    # somehow the file also includes future deactivation dates
+    # so i have to do this part to make sure i don't replace the ones that actually have taxonomy codes
+    deact_df['Healthcare Provider Taxonomy Code'] = deact_df['Healthcare Provider Taxonomy Code'].mask(
+        deact_df['Healthcare Provider Taxonomy Code'].isna(), 'deactivated NPI').copy()
+    deact_df = deact_df.drop_duplicates(subset=['NPI','Healthcare Provider Taxonomy Code'], ignore_index = True).copy()
+    counter_2 += 1
+
+# reorder the columns
+cols_copy3a = default_cols.copy()
+cols_copy3a.extend(['Healthcare Provider Taxonomy Code', 'Primary Taxonomy Switch', 'Healthcare Provider Taxonomy Group'])
+deact_df = deact_df[cols_copy3a].copy()
+
+# status update
+t1_stop = process_time()
+print('finished with 1st df, df for deactivated npi')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start)
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+# status update
+print('starting with 2nd df, df for nonprimary and nondeactivated npi')
+t1_start = process_time() 
+
+# this is for NPIs that are from the secondary_df that are not deactivated
+# third copy of the default cols
+nodeact_df = pd.DataFrame()
+cols_copy4 = default_cols.copy()
+counter_2 = 1
+while counter_2 < 16:
+    cols_copy4.extend([f'{tax_code_str}{counter_2}',f'{tax_switch_str}{counter_2}',f'{tax_group_str}{counter_2}'])
+    df1 = secondary_df[~secondary_df['NPI'].isin(deact_df['NPI'])][cols_copy4].copy()
+    df1 = df1.rename(columns = {f'{tax_code_str}{counter_2}': 'Healthcare Provider Taxonomy Code',
+                                f'{tax_switch_str}{counter_2}' : 'Primary Taxonomy Switch',
+                                f'{tax_group_str}{counter_2}': 'Healthcare Provider Taxonomy Group'}).copy()
+    # reset the list since the extend will continuously take new columns
+    cols_copy4 = default_cols.copy()
+    nodeact_df = pd.concat([nodeact_df,df1], ignore_index = True)
+    nodeact_df = nodeact_df.drop_duplicates(subset=['NPI','Healthcare Provider Taxonomy Code'], ignore_index = True).copy()
+    counter_2 += 1
+
+# this is to take out the codes with null values in the nodeact_dfna data
+# make a series with npi as index indicating if a npi has 2 or more unique values
+multi_nodeact = nodeact_df.NPI.value_counts(sort = False) >= 2
+
+# setting npi as index for the deactivated npi data to reference to the previous series
+nodeact_df = nodeact_df.set_index(['NPI']).copy()
+
+# this is for the rows that we are looking for, npi with taxonomy codes but null values too
+temp_nodeact = nodeact_df.loc[multi_nodeact].copy()
+temp_nodeact = temp_nodeact[temp_nodeact['Healthcare Provider Taxonomy Code'].isna()].copy()
+
+# reset the index to make new index with the npi and the taxonomy code that's equal to null
+temp_nodeact = temp_nodeact.reset_index().copy()
+temp_nodeact = temp_nodeact.set_index(['NPI', 'Healthcare Provider Taxonomy Code']).copy()
+
+# reset the index to make new index so i can use the previous series
+nodeact_df = nodeact_df.reset_index().copy()
+nodeact_df = nodeact_df.set_index(['NPI', 'Healthcare Provider Taxonomy Code']).copy()
+
+# only keep the values that row not in the temp_nodeact series
+# reset the index, reorder the columns
+nodeact_df = nodeact_df.loc[~nodeact_df.index.isin(temp_nodeact.index)].copy()
+nodeact_df = nodeact_df.reset_index().copy()
+cols_copy4a = default_cols.copy()
+cols_copy4a.extend(['Healthcare Provider Taxonomy Code', 'Primary Taxonomy Switch', 'Healthcare Provider Taxonomy Group'])
+nodeact_df = nodeact_df[cols_copy4a].copy()
+
+# status update
+t1_stop = process_time()
+print('finished with second table')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start)
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+# status update
+print('combining all 3 tables, final step')
+t1_start = process_time() 
+
+# concact all 3 dataframes
+# export to csv
+updated_df = pd.concat([primary_df, deact_df,nodeact_df], ignore_index = True)
+
+# found 17 active npi with no taxonomy codes associated, double checked, going to assign no taxonomy code
+updated_df['Healthcare Provider Taxonomy Code'] = updated_df['Healthcare Provider Taxonomy Code'].mask(
+    updated_df['Healthcare Provider Taxonomy Code'].isna(), 'active but no code').copy()
+
+# adding one more column for taxonomy code status
+def npi_status(code):
+    if code == 'deactivated NPI':
+        return 'deactivated NPI'
+    if code == 'active but no code':
+        return 'active but no code'
+    else:
+        return 'active NPI'
+updated_df['NPI Status'] = updated_df['Healthcare Provider Taxonomy Code'].map(npi_status).copy()
+
+# changing the no code and deactivated npi in the taxonomy code column back to nan for the sql server
+updated_df['Healthcare Provider Taxonomy Code'] = updated_df['Healthcare Provider Taxonomy Code'].mask(
+    updated_df['Healthcare Provider Taxonomy Code'].isin(['deactivated NPI', 'active but no code']), np.nan)
+
+# change the order of the columns
+move_list = ['NPI Status', 'Healthcare Provider Taxonomy Code', 'Primary Taxonomy Switch', 'Healthcare Provider Taxonomy Group']
+column_counter = 1
+for i in move_list:
+    column_to_move = updated_df.pop(i)
+    updated_df.insert(column_counter, i, column_to_move)
+    column_counter += 1
+
+# status update
+t1_stop = process_time()
+print('completed!')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start) 
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+# status update
+print('starting with creating the two tables for on sql server')
+t1_start = process_time()
+
+# starting with the tables with the taxonomy codes, keeping the first 5 columns
+npi_tax_df = updated_df.iloc[:, 0:5].copy()
+
+# adding a surrogate key column to make composite primary key with npi
+npi_tax_df['id'] = range(1, len(npi_tax_df)+1)
+
+# change the order of the columns
+column_to_move = npi_tax_df.pop('id')
+npi_tax_df.insert(0, 'id', column_to_move)
+
+# creating the table with general information about the npi
+# taking the rest of the columns and also the npi column
+npi_info_df = updated_df.iloc[:, 5:].copy()
+npi_info_df['NPI'] = updated_df['NPI'].copy()
+
+# chaning the order of the columns
+column_to_move = npi_info_df.pop('NPI')
+npi_info_df.insert(0,'NPI', column_to_move)
+
+# dropping duplicate rows of npi
+npi_info_df = npi_info_df.drop_duplicates(subset=['NPI'], ignore_index=True).copy()
+
+# status update
+t1_stop = process_time()
+print('finished with creating the two tables for on sql server')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start) 
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+# status update
+print('starting with creating the two tables on sql server')
+t1_start = process_time() 
+
+# load the text file containing the texts needed for sql server connection
+sql_path = r'C:\Users\Ray\Desktop\cms\npi_taxonomy related\sqlserverinfo.txt'
+sql_text = open(sql_path, 'r').read()
+sql_list = sql_text.split(",")
+
+# establish the connection to sql server
+try:
+    cnxn = pyodbc.connect(
+        rf'{sql_list[0]}'
+        rf'{sql_list[1]}'
+        rf'{sql_list[2]}'
+        rf'{sql_list[3]}'
+    )
+    cursor = cnxn.cursor()
+    print("Connection established.")
+except pyodbc.Error as e:
+    print("Error in connection:", e)
+else:
+    cursor = cnxn.cursor()
+
+
+# creating the columns needed to the sql query, starting with the npi_tax_df
+# creating a list of the column names
+df_cols = npi_tax_df.columns.to_list()
+# creating a separate list to store the column indexes that i already used
+cols_index_list = []
+# creating an dict for sql create table query
+cols_dict = dict()
+
+# the loop to populate the empty dict
+for cols_index in range(6):
+    if npi_tax_df[df_cols[cols_index]].dtype == 'int64':
+        cols_dict[df_cols[cols_index]] = 'int NOT NULL'
+        cols_index_list.append(cols_index)
+    elif cols_index not in cols_index_list:
+        if not npi_tax_df[df_cols[cols_index]].isna().all() and npi_tax_df[df_cols[cols_index]].astype('string').str.len().max() > 255:
+            cols_dict[df_cols[cols_index]] = f'VARCHAR({npi_tax_df[df_cols[cols_index]].astype("string").str.len().max() + 20})'
+        else:
+            cols_dict[df_cols[cols_index]] = 'VARCHAR(255)'
+
+# change the keys so i can use the column names in the sql query
+# create a dict to hold the new names values
+bracket_cols_dict = dict()
+for k, v in cols_dict.items():
+    new_key = f'[{k}]'
+    bracket_cols_dict[k] = new_key
+
+for old, new in bracket_cols_dict.items():
+    cols_dict[new] = cols_dict.pop(old)
+
+# a string to create the column names for the query
+columns_string =''''''
+for key, value in cols_dict.items():
+    columns_string += f'{key} {value},\n'
+
+tax_columns_string = columns_string
+
+# creating the columns for sql query for npi_info_df
+# creating a list of the column names
+df_cols = npi_info_df.columns.to_list()
+# creating a separate list to store the column indexes that i already used
+cols_index_list = []
+# creating an dict for sql create table query
+cols_dict = dict()
+
+# the loop to populate the empty dict
+for cols_index in range(43):
+    if npi_info_df[df_cols[cols_index]].dtype == 'int64' and df_cols[cols_index] == 'NPI':
+        cols_dict[df_cols[cols_index]] = 'int NOT NULL'
+        cols_index_list.append(cols_index)
+    elif df_cols[cols_index] == 'Entity Type Code':
+        cols_dict[df_cols[cols_index]] = 'float'
+        cols_index_list.append(cols_index)
+    elif df_cols[cols_index] == 'NPI Deactivation Reason Code ':
+        cols_dict[df_cols[cols_index]] = 'VARCHAR(20)'
+        cols_index_list.append(cols_index)
+    elif updated_df[df_cols[cols_index]].dtype == 'datetime64[ns]':
+        cols_dict[df_cols[cols_index]] = 'date'
+        cols_index_list.append(cols_index)
+    elif cols_index not in cols_index_list:
+        if not updated_df[df_cols[cols_index]].isna().all() and updated_df[df_cols[cols_index]].astype('string').str.len().max() > 255:
+            cols_dict[df_cols[cols_index]] = f'VARCHAR({updated_df[df_cols[cols_index]].astype("string").str.len().max() + 20})'
+        else:
+            cols_dict[df_cols[cols_index]] = 'VARCHAR(255)'
+
+# change the keys so i can use the column names in the sql query
+# create a dict to hold the new names values
+bracket_cols_dict = dict()
+for k, v in cols_dict.items():
+    new_key = f'[{k}]'
+    bracket_cols_dict[k] = new_key
+
+for old, new in bracket_cols_dict.items():
+    cols_dict[new] = cols_dict.pop(old)
+
+# a string to create the column names for the query
+columns_string =''''''
+for key, value in cols_dict.items():
+    columns_string += f'{key} {value},\n'
+
+info_columns_string = columns_string    
+
+# query to drop the tables if it exit
+drop_tax_table_query = '''
+IF OBJECT_ID('npi_taxonomy') IS NOT NULL
+	DROP TABLE npi_taxonomy
+'''
+
+drop_info_table_query = '''
+IF OBJECT_ID('npi_information') IS NOT NULL
+	DROP TABLE npi_information
+'''
+
+# query to create the tables
+create_tax_table_query = f'''
+CREATE TABLE npi_taxonomy (
+{tax_columns_string}CONSTRAINT PK_npi_taxonomy PRIMARY KEY (id)
+)
+'''
+
+create_info_table_query = f'''
+CREATE TABLE npi_information (
+{info_columns_string}CONSTRAINT PK_npi_information PRIMARY KEY (NPI)
+)
+'''
+
+# running the two queries
+cursor.execute(drop_tax_table_query)
+cnxn.commit()
+cursor.execute(create_tax_table_query)
+cnxn.commit()
+cursor.execute(drop_info_table_query)
+cnxn.commit()
+cursor.execute(create_info_table_query)
+cnxn.commit()
+
+# status update
+t1_stop = process_time()
+print('finished with table creation!')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start) 
+# ------------------------------------------------------------------------------------------------------------------------------------------- 
+# status update
+print('starting with loading the dataframe into the NPI_information table on sql server')
+t1_start = process_time() 
+
+# set up the part needed for bcpandas for importing data to the created table in sql server
+connection_string = sql_text.replace(',', '')
+connection_string = connection_string.replace('SQL Server', 'ODBC Driver 17 for SQL Server')
+print(connection_string)
+
+# loading the data into the sql server table
+connection_url = URL.create("mssql+pyodbc", query={"odbc_connect": connection_string})
+engine1 = sa.create_engine(connection_url)
+creds = SqlCreds.from_engine(engine1.engine)
+to_sql(npi_tax_df, 'npi_taxonomy', creds, index=False, if_exists='append')
+to_sql(npi_info_df, 'npi_information', creds, index=False, if_exists='append')
+
+# close the connection
+cnxn.close()
+
+# status update
+t1_stop = process_time()
+print('finished with loading the dataframe table!')
+print("Elapsed time during this part in seconds: ", t1_stop-t1_start) 
+# -------------------------------------------------------------------------------------------------------------------------------------------
+
+t1_total_stop = process_time()
+print("Elapsed time during the whole program in seconds: ", t1_total_stop-t1_total_start) 
