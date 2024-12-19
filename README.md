@@ -13,6 +13,6 @@ Files included:
 
 Instructions:
   * Can follow along the comments left in the Python code file, would have to provide your own sql server info
-  * the Python code file includes instructions and logic on creating two separate tables from the original NPI and taxonomy table
+  * The Python code file includes instructions and logic on creating two separate tables from the original NPI and taxonomy table
   * Afterwards can set up the third table (for the taxonomy and details) following the screenshot configuration
   * Lastly use the SQL code to set up the primary and foreign key
